@@ -682,6 +682,85 @@ func RouteAppend(route *Route) error {
 	return pkgHandle.RouteAppend(route)
 }
 
+func RouteListTable(link Link, family, table int) ([]Route, error) {
+	return pkgHandle.RouteListTable(link, family, table)
+}
+
+func (h *Handle) RouteListTable(link Link, family, table int) ([]Route, error) {
+	var routeFilter *Route
+	if link != nil {
+		routeFilter = &Route{
+			LinkIndex: link.Attrs().Index,
+		}
+	}
+
+	return h.RouteListFilteredTable(family, table, routeFilter, RT_FILTER_OIF)
+}
+
+// RouteListFiltered gets a list of routes in the system filtered with specified rules.
+// All rules must be defined in RouteFilter struct
+func (h *Handle) RouteListFilteredTable(family, table int, filter *Route, filterMask uint64) ([]Route, error) {
+	req := h.newNetlinkRequest(unix.RTM_GETROUTE, unix.NLM_F_DUMP)
+	infmsg := nl.NewIfInfomsg(family)
+	req.AddData(infmsg)
+
+	msgs, err := req.Execute(unix.NETLINK_ROUTE, unix.RTM_NEWROUTE)
+	if err != nil {
+		return nil, err
+	}
+
+	var res []Route
+	for _, m := range msgs {
+		msg := nl.DeserializeRtMsg(m)
+		if msg.Flags&unix.RTM_F_CLONED != 0 {
+			// Ignore cloned routes
+			continue
+		}
+		if msg.Table != uint8(table) {
+			if filter == nil || filter != nil && filterMask&RT_FILTER_TABLE == 0 {
+				// Ignore non-main tables
+				continue
+			}
+		}
+		route, err := deserializeRoute(m)
+		if err != nil {
+			return nil, err
+		}
+		if filter != nil {
+			switch {
+			case filterMask&RT_FILTER_TABLE != 0 && filter.Table != unix.RT_TABLE_UNSPEC && route.Table != filter.Table:
+				continue
+			case filterMask&RT_FILTER_PROTOCOL != 0 && route.Protocol != filter.Protocol:
+				continue
+			case filterMask&RT_FILTER_SCOPE != 0 && route.Scope != filter.Scope:
+				continue
+			case filterMask&RT_FILTER_TYPE != 0 && route.Type != filter.Type:
+				continue
+			case filterMask&RT_FILTER_TOS != 0 && route.Tos != filter.Tos:
+				continue
+			case filterMask&RT_FILTER_OIF != 0 && route.LinkIndex != filter.LinkIndex:
+				continue
+			case filterMask&RT_FILTER_IIF != 0 && route.ILinkIndex != filter.ILinkIndex:
+				continue
+			case filterMask&RT_FILTER_GW != 0 && !route.Gw.Equal(filter.Gw):
+				continue
+			case filterMask&RT_FILTER_SRC != 0 && !route.Src.Equal(filter.Src):
+				continue
+			case filterMask&RT_FILTER_DST != 0:
+				if filter.MPLSDst == nil || route.MPLSDst == nil || (*filter.MPLSDst) != (*route.MPLSDst) {
+					if !ipNetEqual(route.Dst, filter.Dst) {
+						continue
+					}
+				}
+			case filterMask&RT_FILTER_HOPLIMIT != 0 && route.Hoplimit != filter.Hoplimit:
+				continue
+			}
+		}
+		res = append(res, route)
+	}
+	return res, nil
+}
+
 // RouteAppend will append a route to the system.
 // Equivalent to: `ip route append $route`
 func (h *Handle) RouteAppend(route *Route) error {
